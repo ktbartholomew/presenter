@@ -22,6 +22,11 @@ var
 // The layout to use if no layout_key is requested by the metadata envelope.
 var nullLayout = handlebars.compile("{{{ envelope.body }}}");
 
+// Match nunjucks-like "{{ to('') }}" directives that are used to defer rendering of presented URLs
+// until presenter-time.
+var urlDirectiveRx = /{{\s*to\('[^']+'\)\s*}}/g;
+// syntax highlighting fix '
+
 // Derive the presented URL for a specific request, honoring the presented_url_domain and
 // presented_url_proto settings if provided.
 function presented_url(req) {
@@ -156,7 +161,7 @@ function globals(presentedUrl, contentDoc, callback) {
 }
 
 // Now that a content document is available, perform post-processing calls in parallel.
-function postprocess(presented_url, content_doc, callback) {
+function old_postprocess(presented_url, content_doc, callback) {
   if (content_doc.proxyTo) {
     callback(null, content_doc);
   } else if (content_doc.contentID) {
@@ -179,7 +184,7 @@ function postprocess(presented_url, content_doc, callback) {
       callback(null, output_doc);
     });
   } else {
-    callback(content_error(content_doc, "postprocess"), {});
+    callback(content_error(content_doc, "old_postprocess"), {});
   }
 }
 
@@ -331,7 +336,7 @@ function old_content (req, res) {
   async.waterfall([
     async.apply(mapping, presented),
     content,
-    async.apply(postprocess, presented)
+    async.apply(old_postprocess, presented)
   ], function (err, content_doc) {
     if (err) {
       var code = err.statusCode || 500;
@@ -392,15 +397,48 @@ var TemplateService = require('../services/template');
 var TemplateRoutingService = require('../services/template-routing');
 var ContentRoutingService = require('../services/content-routing');
 
+// Perform follow-on work necessary to prepare a specific content document for rendering.
+function postprocess(contentDoc, callback) {
+    if (contentDoc.contentID) {
+        // Replace any "{{ to() }}" directives with
+        var processed = contentDoc.body.replace(
+            urlDirectiveRx,
+            function (match, contentID) {
+                return ContentRoutingService.getPresentedURL(contentID);
+            }
+        );
+
+        // Locate the URLs for the content IDs of any next and previous links included in the
+        // document.
+        if (contentDoc.next && contentDoc.next.contentID && ! contentDoc.next.url) {
+            contentDoc.next.url = ContentRoutingService.getPresentedURL(contentDoc.next.contentID);
+        }
+
+        if (contentDoc.previous && contentDoc.previous.contentID && ! contentDoc.previous.url) {
+            contentDoc.previous.url = ContentRoutingService.getPresentedURL(contentDoc.previous.contentID);
+        }
+
+        contentDoc.body = processed;
+
+        callback(null, contentDoc);
+    } else if (contentDoc.proxyTo) {
+        callback(null, contentDoc);
+    } else {
+        callback(content_error(contentDoc, "postprocess"));
+    }
+}
+
 module.exports = function (req, res) {
     var contentId = ContentRoutingService.getContentId();
 
     content({contentID: contentId}, function (err, result) {
+        postprocess(result, function (err, result) {
 
-        res.send(TemplateService.render(TemplateRoutingService.getRoute(), {
-            deconst: {
-                content: result
-            }
-        }));
+            res.send(TemplateService.render(TemplateRoutingService.getRoute(), {
+                deconst: {
+                    content: result
+                }
+            }));
+        });
     });
 };
